@@ -222,7 +222,7 @@ void set_defaults() {
   wpm_dif = 0;
   wpm_dif_manual = 0;
   dah_to_dit_ratio = 300; // 3:1
-  length_wordspace = 8;
+  length_wordspace = 5;
   weighting = 50; // Normal keying
   wpm = pot_value_wpm();
   manual_wpm_limit = 0; // Switched off

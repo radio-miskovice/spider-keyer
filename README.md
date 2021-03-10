@@ -1,6 +1,6 @@
 # Spider Keyer
 
-Spider Keyer is Arduino-based CW keyer developed by Petr, OK1FIG. Its main purpose is to be a "companion equipment" to be used with HamRacer contesting software.
+Spider Keyer is Arduino-based CW keyer developed by Petr, OK1FIG. Its main purpose is to be a "companion equipment" to be used with [HamRacer](http://ok1fig.nagano.cz/HamRacer/HamRacer.htm) contesting software.
 
 The main inspiration for Spider Keyer was K3NG keyer software. Petr's main motivation to remake the original code base was (according to author):
 
@@ -16,9 +16,9 @@ The main inspiration for Spider Keyer was K3NG keyer software. Petr's main motiv
   efficient use of all capabilities provided by Arduino hardware and the keyer features.
 
 
-- Spider keyer main page: http://ok1fig.nagano.cz/SpiderKeyer/SpiderKeyer.htm
-- Spider keyer home made constructions: http://ok1fig.nagano.cz/SpiderKeyer/SpiderKeyerHm.htm
-- Spider keyer protocol specification: http://ok1fig.nagano.cz/SpiderKeyer/SpiderKeyerSpecs.htm
-- HamRacer logging software description: http://ok1fig.nagano.cz/HamRacer/HamRacer.htm
+- Spider keyer [main page](http://ok1fig.nagano.cz/SpiderKeyer/SpiderKeyer.htm)
+- Spider keyer [home made constructions](http://ok1fig.nagano.cz/SpiderKeyer/SpiderKeyerHm.htm)
+- Spider keyer [protocol specification](http://ok1fig.nagano.cz/SpiderKeyer/SpiderKeyerSpecs.htm)
+- [HamRacer](http://ok1fig.nagano.cz/HamRacer/HamRacer.htm) logging software description: 
 
 Sketch is placed on Github by Jindra, OK4RM. Version may be not the newest one, depending on what OK1FIG will be willing to share ;-)

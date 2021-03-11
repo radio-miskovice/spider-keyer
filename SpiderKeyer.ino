@@ -1,4 +1,4 @@
-/*  Spider Keyer (version 1.xx) by Petr OK1FIG, Dec 2018, May 2019, Dec 2020
+/*  Spider Keyer (version 1.xx) by Petr OK1FIG, Dec 2018, May 2019, Mar 2021
     This code was developed for Arduino Nano. Other Arduinos were not tested.
     The goal is to work seamlessly with HamRacer contesting software:
     http://ok1fig.nagano.cz/HamRacer/HamRacer.htm
@@ -7,24 +7,22 @@
 */
 
 #include <EEPROM.h>
-#define VERSION "1.31" // Dec 2020
+#define VERSION "1.36" // Mar 2021
 
 // Pin assigment. This complies to HW: http://ok1fig.nagano.cz/SpiderKeyer/SpiderKeyer.htm
-#define paddle_left 2  // Must be 2 or 3 because of interrupts
-#define paddle_right 3 // Must be 2 or 3 because of interrupts
-#define ptt_tx_1 9  // PTT
-#define tx_key_line_1 10 // Keying
-#define sidetone_line 11 // Buzzer
-#define potentiometer A0  // Speed potentiometer (0 to 5 V)
+#define PADDLE_LEFT 2  // Must be 2 or 3 because of interrupts
+#define PADDLE_RIGHT 3 // Must be 2 or 3 because of interrupts
+#define PTT_TX_1 9  // PTT
+#define TX_KEY_LINE_1 10 // Keying
+#define SIDETONE_LINE 11 // Buzzer
+#define POTENTIOMETER A0  // Speed potentiometer (0 to 5 V)
 
-#define button 6 // the button to send message or tune
-#define dummy_1 7  
-#define dummy_2 8 
+#define BUTTON 6 // the button to send message or tune
 
-#define my_magic_header 43690 // Binary 1010 1010 1010 1010
+#define MY_HEADER 43690 // Binary 1010 1010 1010 1010
 
-#define potentiometer_change_threshold 0.9 
-#define potentiometer_check_interval_ms 150
+#define POT_CHANGE_THRESHOLD 0.9
+#define POT_CHECK_INTERVAL 150
 // For other values look into set_defaults()
 
 
@@ -38,7 +36,8 @@ byte length_wordspace;
 byte weighting;
 unsigned int sidetone_automatic; // In Hz
 unsigned int sidetone_manual; // In Hz
-volatile byte sending_mode; // MANUAL_SENDING, AUTOMATIC_SENDING
+byte sending_mode; // MANUAL_SENDING, AUTOMATIC_SENDING
+byte last_sending_mode;
 unsigned int ptt_tail_time;
 unsigned int ptt_lead_time;
 byte dit_buffer;
@@ -49,7 +48,6 @@ byte ptt_state;     // 0: RX, 1: TX
 unsigned long ptt_time;
 byte length_letterspace;
 float ptt_hang_time_wordspace_units;
-byte last_sending_mode;
 byte iambic_flag;
 byte pot_wpm_low_value;
 byte pot_wpm_high_value;
@@ -71,10 +69,9 @@ bool send_feedback;
 byte enabled_features; // bits: 0 (val 1): ptt, 1 (val 2): key, 2 (val 4): speed potentiometer, ..., ... 7: ...
 bool paddles_touched;
 bool paddles_swapped; // For left-handed OPs and for OPs from Ricany u Prahy
-unsigned long last_event;
 long btn_toggle; // Debounce the message sending button
-unsigned long last_powerbank;
-
+volatile bool interrupt_sending;
+byte response_needed;
 
 // The commands that can be sent from PC, either buffered or immediate:
 #define CMD_FIRST 1
@@ -106,7 +103,7 @@ unsigned long last_powerbank;
 #define CMD_LAST 25
 
 // Every immediate command must preceeded with this char:
-#define ESCAPE_CHAR 27 
+#define ESCAPE_CHAR 27
 // Values used internally:
 #define IAMBIC_A 1
 #define IAMBIC_B 2
@@ -119,40 +116,37 @@ unsigned long last_powerbank;
 
 // --------------------------------------------------------------------------------------------
 void setup() {
-  pinMode (paddle_left, INPUT_PULLUP);
-  pinMode (paddle_right, INPUT_PULLUP);
-  pinMode (tx_key_line_1, OUTPUT);
+  pinMode (PADDLE_LEFT, INPUT_PULLUP);
+  pinMode (PADDLE_RIGHT, INPUT_PULLUP);
+  pinMode (TX_KEY_LINE_1 , OUTPUT);
 
-  pinMode (dummy_1, OUTPUT);
-  pinMode (dummy_2, OUTPUT);
-  digitalWrite (dummy_1, LOW);
-  digitalWrite (dummy_2, LOW);
+  pinMode (BUTTON, INPUT_PULLUP);
 
-  pinMode (button, INPUT_PULLUP);
-
-  digitalWrite (tx_key_line_1, LOW);
-  pinMode (ptt_tx_1, OUTPUT);
-  digitalWrite (ptt_tx_1, LOW);
-  pinMode (sidetone_line, OUTPUT);
-  digitalWrite (sidetone_line, LOW);
-  pinMode(potentiometer, INPUT);
+  digitalWrite (TX_KEY_LINE_1, LOW);
+  pinMode (PTT_TX_1, OUTPUT);
+  digitalWrite (PTT_TX_1, LOW);
+  pinMode (SIDETONE_LINE, OUTPUT);
+  digitalWrite (SIDETONE_LINE, LOW);
+  pinMode(POTENTIOMETER, INPUT);
 
   set_defaults();
   reset_com();
-  
+
   Serial.begin(57600); // primary_serial_port_baud_rate
 
-  attachInterrupt(digitalPinToInterrupt(paddle_left), left_paddle_change, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(paddle_right), right_paddle_change, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PADDLE_LEFT), paddle_down, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PADDLE_RIGHT), paddle_down, FALLING);
+
 
   // Short low-pitch beep to indicate Arduino Nano was started/restarted:
-  tone(sidetone_line, 50);
+  tone(SIDETONE_LINE, 50);
   delay(30);
-  noTone(sidetone_line);
+  noTone(SIDETONE_LINE);
 }
 
 // --------------------------------------------------------------------------------------------
 void loop() {
+  check_interruption();
   check_dit_paddle();
   check_dah_paddle();
   service_dit_dah_buffers();
@@ -161,9 +155,8 @@ void loop() {
   service_send_buffer();
   check_ptt_tail();
   check_potentiometer();
-  check_delayed_send_response();
   check_button();
-  
+
 }
 // --------------------------------------------------------------------------------------------
 
@@ -173,9 +166,9 @@ void loop() {
 void reset_com() {
   /* Makes a total reset, puts all to inactive and resets the status flags. Should be called
     in need to fetch the device to a "defined state". */
-  digitalWrite (tx_key_line_1, LOW);
-  digitalWrite (ptt_tx_1, LOW);
-  noTone(sidetone_line);
+  digitalWrite (TX_KEY_LINE_1, LOW);
+  digitalWrite (PTT_TX_1, LOW);
+  noTone(SIDETONE_LINE);
   esc_char_rcvd_command = 0;
   ptt_forced_on = false;
   key_forced_down = 0;
@@ -191,12 +184,13 @@ void reset_com() {
   wpm_dif = 0;
   wpm_dif_manual = 0;
   paddles_touched = false;
-  last_sending_mode = MANUAL_SENDING;
   sending_mode = MANUAL_SENDING;
-  last_event = 0;
+  last_sending_mode = MANUAL_SENDING;
+  interrupt_sending = false;
+  response_needed = false;
 }
-// --------------------------------------------------------------------------------------------
 
+// --------------------------------------------------------------------------------------------
 
 
 // --------------------------------------------------------------------------------------------
@@ -207,9 +201,9 @@ void set_defaults() {
   ptt_tail_time = 5;
   ptt_lead_time = 30; // mSec
   length_letterspace = 3; // dash to dot is 3:1   //default_length_letterspace;
-  ptt_hang_time_wordspace_units = 0.9; 
-  last_sending_mode = MANUAL_SENDING;
-  pot_wpm_low_value = 15; 
+  ptt_hang_time_wordspace_units = 0.9;
+//  last_sending_mode = MANUAL_SENDING;
+  pot_wpm_low_value = 15;
   pot_wpm_high_value = 40;
   last_pot_wpm_read = 0;
   last_pot_check_time = 0;
@@ -222,14 +216,13 @@ void set_defaults() {
   wpm_dif = 0;
   wpm_dif_manual = 0;
   dah_to_dit_ratio = 300; // 3:1
-  length_wordspace = 5;
+  length_wordspace = 8;
   weighting = 50; // Normal keying
   wpm = pot_value_wpm();
   manual_wpm_limit = 0; // Switched off
   enabled_features = 255; // All features enabled
   paddles_swapped = false;
   btn_toggle = 0;
-  last_powerbank = millis();// - 5000L; // Start drag current 3 seconds after the unit was started
 
   // Override the above values by the values from EEPROM on condition EEPROM was already written to:
   load_config();
@@ -241,10 +234,10 @@ void set_defaults() {
 
 // --------------------------------------------------------------------------------------------
 void check_potentiometer() {
-  if (bitRead(enabled_features, 2) == 1) 
-    if ((millis() - last_pot_check_time) > potentiometer_check_interval_ms) {
+  if (bitRead(enabled_features, 2) == 1)
+    if ((millis() - last_pot_check_time) > POT_CHECK_INTERVAL) {
       byte pot_value_wpm_read = pot_value_wpm();
-      if ((abs(pot_value_wpm_read - last_pot_wpm_read) > potentiometer_change_threshold)) {
+      if ((abs(pot_value_wpm_read - last_pot_wpm_read) > POT_CHANGE_THRESHOLD)) {
         speed_set_by_pot = true;
         speed_set(pot_value_wpm_read);
         last_pot_wpm_read = pot_value_wpm_read;
@@ -269,8 +262,8 @@ void check_serial() {
     } // In order the lead time doesn't occur between first and second char
 
     bytes_rcvd++;
-    }
-  
+  }
+
 }
 // --------------------------------------------------------------------------------------------
 
@@ -280,14 +273,19 @@ void service_send_buffer() {
     if (send_buffer[get_at] >= 32) { // Printable character, send it
       send_char(send_buffer[get_at]);
       remove_from_send_buffer();
-    } else if ((send_buffer[get_at] >= CMD_FIRST) && (send_buffer[get_at] <= CMD_LAST)) {
+    } else if ((send_buffer[get_at] >= CMD_FIRST) && (send_buffer[get_at] <= CMD_LAST)) { // Buffered or immediate command
       if (send_buffer_bytes() > 1) {
-        process_command(send_buffer[get_at], send_buffer[(get_at + 1) % 256], true); // todo:
+        process_command(send_buffer[get_at], send_buffer[(get_at + 1) % 256], true);
         remove_from_send_buffer();
         remove_from_send_buffer();
-      } 
+      }
     }
-  } 
+  } else { // Buffer was just exhausted, sending turns to MANUAL again. Necessary for smooth hand-keying that can follow
+    sending_mode = MANUAL_SENDING;
+    last_sending_mode = MANUAL_SENDING;
+    
+  }
+  
 }
 // --------------------------------------------------------------------------------------------
 
@@ -296,7 +294,11 @@ void speed_set(int wpm_set) {
   if (wpm_set < pot_wpm_low_value) wpm_set = pot_wpm_low_value;
   if (wpm_set > pot_wpm_high_value) wpm_set = pot_wpm_high_value;
   wpm = wpm_set;
-  send_response();
+  // Send the reporting bytes when PTT goes to RX. Sending response while hand keying is in progress makes some irregularites in keying.
+  if (sending_mode == MANUAL_SENDING && ptt_state)
+    response_needed = true;
+  else
+    send_response();
 }
 // --------------------------------------------------------------------------------------------
 
@@ -330,36 +332,35 @@ void send_dah() {
 
 // --------------------------------------------------------------------------------------------
 void key(int state) {
-  if ((state) && (key_state == 0)) {
-    byte ptt_state_previous = ptt_state;
 
+  if ((state) && (key_state == 0)) {
 
     if (key_forced_down != 1)
       if (paddles_trigger_ptt || sending_mode == AUTOMATIC_SENDING) {
         ptt(true);
       }
 
-    if (bitRead(enabled_features, 1 /*key*/) == 1) 
-      digitalWrite (tx_key_line_1, HIGH);
+    if (bitRead(enabled_features, 1 /*key*/) == 1)
+      digitalWrite (TX_KEY_LINE_1, HIGH);
 
     if (sending_mode == MANUAL_SENDING) {
       if (sidetone_manual > 0)
-        tone(sidetone_line, sidetone_manual);
+        tone(SIDETONE_LINE, sidetone_manual);
     }
     else {
       if (sidetone_automatic > 0)
-        tone(sidetone_line, sidetone_automatic);
+        tone(SIDETONE_LINE, sidetone_automatic);
     }
     key_state = 1;
   } else {
     if ((state == 0) && (key_state)) {
-      digitalWrite (tx_key_line_1, LOW);
+      digitalWrite (TX_KEY_LINE_1, LOW);
       if (key_forced_down != 1)
         if (paddles_trigger_ptt || sending_mode == AUTOMATIC_SENDING)
           ptt(true);
     }
     if (sidetone_automatic > 0 || sidetone_manual > 0)
-      noTone(sidetone_line);
+      noTone(SIDETONE_LINE);
     key_state = 0;
   }
   check_ptt_tail();
@@ -377,7 +378,7 @@ void loop_element_lengths(float lengths, int speed_wpm_in) {
   while (((millis() - start) < ticks)) {
     check_ptt_tail();
 
-    if ((keyer_mode == IAMBIC_A) && (digitalRead(paddle_left) == LOW ) && (digitalRead(paddle_right) == LOW )) {
+    if ((keyer_mode == IAMBIC_A) && (digitalRead(PADDLE_LEFT) == LOW ) && (digitalRead(PADDLE_RIGHT) == LOW )) {
       iambic_flag = 1;
     }
 
@@ -392,27 +393,23 @@ void loop_element_lengths(float lengths, int speed_wpm_in) {
       }
     }
 
-    if (sending_mode == AUTOMATIC_SENDING && (digitalRead(paddle_left) == LOW || digitalRead(paddle_right) == LOW || dit_buffer || dah_buffer)) {
-      sending_mode = MANUAL_SENDING;
-      last_sending_mode = MANUAL_SENDING;
-      return;
-    } 
-  }  
+    if (interrupt_sending)
+      break;
+  }
 
-  if ((keyer_mode == IAMBIC_A) && (iambic_flag) && (digitalRead(paddle_left) == HIGH ) && (digitalRead(paddle_right) == HIGH )) {
+  if ((keyer_mode == IAMBIC_A) && (iambic_flag) && (digitalRead(PADDLE_LEFT) == HIGH ) && (digitalRead(PADDLE_RIGHT) == HIGH )) {
     iambic_flag = 0;
     dit_buffer = 0;
     dah_buffer = 0;
   }
-} //void loop_element_lengths
+}
 // --------------------------------------------------------------------------------------------
-
 
 
 // --------------------------------------------------------------------------------------------
 void service_dit_dah_buffers()
 {
-  if ((keyer_mode == IAMBIC_A) && (iambic_flag) && (digitalRead(paddle_left)) && (digitalRead(paddle_right))) {
+  if ((keyer_mode == IAMBIC_A) && (iambic_flag) && (digitalRead(PADDLE_LEFT) == HIGH) && (digitalRead(PADDLE_RIGHT) == HIGH)) {
     iambic_flag = 0;
     dit_buffer = 0;
     dah_buffer = 0;
@@ -435,29 +432,29 @@ void service_dit_dah_buffers()
 // --------------------------------------------------------------------------------------------
 byte pot_value_wpm()
 {
-  int pot_read = analogRead(potentiometer);
+  int pot_read = analogRead(POTENTIOMETER);
   byte return_value = map(pot_read, 0, pot_full_scale_reading, pot_wpm_low_value, pot_wpm_high_value);
   return return_value;
 }
 // --------------------------------------------------------------------------------------------
 
 
-
 // --------------------------------------------------------------------------------------------
 void ptt(bool state) {
   if (state != ptt_state) {
     ptt_state = state;
-    if (state) {
-      if (bitRead(enabled_features, 0 /*ptt*/) == 1)
-        digitalWrite (ptt_tx_1, HIGH);
-//      send_response(); // Don't call send_response(), it causes irregularities in hand sending
-        last_event = millis(); // Use a delayed reporting instead
+    if (state) {  // going to TX
+      if (bitRead(enabled_features, 0) == 1)
+        digitalWrite (PTT_TX_1, HIGH);
       delay(ptt_lead_time);
-    } else {
-      digitalWrite (ptt_tx_1, LOW);
+    } else {    // going to RX
+      digitalWrite (PTT_TX_1, LOW);
       wpm_dif = 0; // Relasing PTT will cancel buffered speed change
-//      send_response(); Don't call send_response(), it causes irregularities in hand sending
-        last_event = millis();
+
+      if (response_needed) {
+        response_needed = false;
+        send_response();
+      }
     }
 
   }
@@ -494,16 +491,29 @@ void check_ptt_tail() {
 
 // --------------------------------------------------------------------------------------------
 void check_dit_paddle() {
-  if ((digitalRead(paddle_left) == 0) && (! paddles_swapped) ||
-     (digitalRead(paddle_right) == 0) && (paddles_swapped)) {
-    dit_buffer = 1;
+  bool was_forced;
+ // if (paddle_intr_pending) 
+ //   exit;
+
+  if ((digitalRead(PADDLE_LEFT) == LOW) && (! paddles_swapped) ||
+      (digitalRead(PADDLE_RIGHT) == LOW) && (paddles_swapped)) {
+    if (! interrupt_sending) {
+      dit_buffer = 1;
+    }
+    was_forced = key_forced_down;
+
     paddles_touched = true;
     key_forced_down = 0;
 
-    // Update last_event only if it was set by ptt(): 
-    if (last_event > 0) last_event = millis();
-    if (wpm > manual_wpm_limit && manual_wpm_limit > 0) 
+
+    if (wpm > manual_wpm_limit && manual_wpm_limit > 0)
       wpm_dif_manual = manual_wpm_limit - wpm;
+
+    // Send response when key was forced. It is necessary for updating the Tune button in HR:
+    if (was_forced)
+      send_response();
+
+
   }
 }
 // --------------------------------------------------------------------------------------------
@@ -511,16 +521,30 @@ void check_dit_paddle() {
 
 // --------------------------------------------------------------------------------------------
 void check_dah_paddle() {
-  if ((digitalRead(paddle_right) == 0) && (! paddles_swapped) || 
-     (digitalRead(paddle_left) == 0) && (paddles_swapped)){
-    dah_buffer = 1;
+  bool was_forced;
+
+ // if (paddle_intr_pending) 
+ //   exit;
+
+  if ((digitalRead(PADDLE_RIGHT) == LOW) && (! paddles_swapped) ||
+      (digitalRead(PADDLE_LEFT) == LOW) && (paddles_swapped)) {
+    if (! interrupt_sending) {
+      dah_buffer = 1;
+    }
+    was_forced = key_forced_down;
+
+
     paddles_touched = true;
     key_forced_down = 0;
 
-    if (last_event > 0) last_event = millis();
-    if (wpm > manual_wpm_limit && manual_wpm_limit > 0) 
+    if (wpm > manual_wpm_limit && manual_wpm_limit > 0)
       wpm_dif_manual = manual_wpm_limit - wpm;
-  } 
+
+    // Send response when key was forced. It is necessary for updating the Tune button in HR:
+    if (was_forced)
+      send_response();
+
+  }
 }
 // --------------------------------------------------------------------------------------------
 
@@ -631,9 +655,6 @@ void send_char(byte cw_char)
 // --------------------------------------------------------------------------------------------
 
 
-
-
-
 // --------------------------------------------------------------------------------------------
 void clear_send_buffer() {
   put_at = 0;
@@ -647,8 +668,9 @@ void clear_send_buffer() {
 void remove_from_send_buffer() {
   if (get_at != put_at) {
     get_at++;
-    if (get_at == put_at) // Last char was just removed, send response
+    if (get_at == put_at) { // Last char was just removed, send response
       send_response();
+    }
   }
 }
 // --------------------------------------------------------------------------------------------
@@ -667,7 +689,7 @@ void process_command(byte command, byte data, bool buffered_command ) {
   byte i, j;
   switch (command)
   {
-    case CMD_SET_PTT : // PTT
+    case CMD_SET_PTT : // PTT, low-level, rate to use
       clear_send_buffer();
       if (data) {
         ptt_forced_on = true;
@@ -677,7 +699,7 @@ void process_command(byte command, byte data, bool buffered_command ) {
         ptt_forced_on = false;
       }
       break;
-    case CMD_SET_KEY : // Key
+    case CMD_SET_KEY : // Key, low-level, rate to use
       clear_send_buffer();
       key_forced_down = data; // 0, 1, or 2
       if (data > 0) {
@@ -719,7 +741,7 @@ void process_command(byte command, byte data, bool buffered_command ) {
     case CMD_SET_WEIGHTING:
       weighting = data;
       break;
-    case CMD_ENABLE_FEATURES: 
+    case CMD_ENABLE_FEATURES:
       enabled_features = data; // This is bitwise!
       break;
     case CMD_SET_PADDLES_TRIGGER_PTT:
@@ -746,9 +768,9 @@ void process_command(byte command, byte data, bool buffered_command ) {
       send_response_bytes();
       break;
     case CMD_BEEP:
-      tone(sidetone_line, 750);
+      tone(SIDETONE_LINE, 750);
       delay(10);
-      noTone(sidetone_line);
+      noTone(SIDETONE_LINE);
       break;
     case CMD_GET_SIGNATURE:
       Serial.print("Spider Keyer (Arduino Nano) by OK1FIG ["); Serial.print(VERSION); Serial.print("]");  // Don't change this to work seamlessly with HamRacer
@@ -757,44 +779,44 @@ void process_command(byte command, byte data, bool buffered_command ) {
       send_feedback = data > 0;
       send_response();
       break;
-    case CMD_SET_LOW_LIMIT : 
+    case CMD_SET_LOW_LIMIT :
       if (data == 0) {      // Value of 0 returns to the default value
-        pot_wpm_low_value = 15; 
+        pot_wpm_low_value = 15;
       } else {
         pot_wpm_low_value = data;
       }
-     break;
-    case CMD_SET_HIGH_LIMIT : 
+      break;
+    case CMD_SET_HIGH_LIMIT :
       if (data == 0) {      // Value of 0 returns to the default value
-        pot_wpm_high_value = 40; 
+        pot_wpm_high_value = 40;
       } else {
         pot_wpm_high_value = data;
       }
-     break;
+      break;
 
-    case CMD_SET_MANUAL_SENDING_LIMIT : 
+    case CMD_SET_MANUAL_SENDING_LIMIT :
       manual_wpm_limit = data;
       break;
 
-    case CMD_SET_PADDLES_SWAPPED : 
+    case CMD_SET_PADDLES_SWAPPED :
       paddles_swapped = data != 0;
       break;
 
-    case CMD_SAVE_CONFIG : 
+    case CMD_SAVE_CONFIG :
       save_config(data);
       break;
 
-    case CMD_STORE_MSG : 
+    case CMD_STORE_MSG :
       store_message(data);
       break;
-     
+
   }
 }
 
 // --------------------------------------------------------------------------------------------
 void check_com() {
   if (esc_char_rcvd_command == 0) {
-    if (incoming_serial_byte != ESCAPE_CHAR) { 
+    if (incoming_serial_byte != ESCAPE_CHAR) {
       add_to_send_buffer(incoming_serial_byte); // Add even CR, it serves as a flag in the buffer
     } else {     // ESC arrived
       esc_char_rcvd_command = 1;
@@ -821,23 +843,23 @@ void send_response() {
 
 // --------------------------------------------------------------------------------------------
 void send_response_bytes() {
-  byte byte1 = 0; 
+  byte byte1 = 0;
   byte byte2 = 0;
   bitSet(byte1, 7); // The highest bit is always 1
 
   if (false)  //RESERVED
-    bitSet(byte1, 6); //
+    bitSet(byte1, 6); //  64
 
   if ((send_buffer_bytes() > 0) || (esc_char_rcvd_command > 0))
-    bitSet(byte1, 5); // any chars buffered?
+    bitSet(byte1, 5); // any chars buffered? // 32
 
   if (ptt_state)
-    bitSet(byte1, 4); // PTT currently down
+    bitSet(byte1, 4); // PTT currently down // 16
 
   if (key_state)
-    bitSet(byte1, 3); // Key currently down
+    bitSet(byte1, 3); // Key currently down  // 8
 
-  if (paddles_touched)
+  if (paddles_touched) // 4
     bitSet(byte1, 2); // Sending was interrupted by touching the paddles
 
   // For the speed report, use only lower 6 bits
@@ -846,10 +868,11 @@ void send_response_bytes() {
       byte2 = wpm;
 
   Serial.write(byte1);
-  Serial.write(byte2); 
-  
+  Serial.write(byte2);
+
 }
 // --------------------------------------------------------------------------------------------
+
 
 
 // --------------------------------------------------------------------------------------------
@@ -863,42 +886,10 @@ byte send_buffer_bytes() { // Number of chars in the buffer to send
 
 
 // --------------------------------------------------------------------------------------------
-void check_delayed_send_response() {
-/* Probably due to interrupts handling it is not desirable to call Serial.write() while the hand keying is in progress. 
-   It causes time irregularities. */
-/* This sends response bytes after one wordspace of inactivity. During this time:
- - paddles were not touched
- - PTT has not been toggled  
- */
-  if ((last_event != 0) && (millis() > last_event + ((length_wordspace * ptt_hang_time_wordspace_units)*float(1200 / wpm)) + ptt_tail_time)) {
-    last_event = 0;
-    send_response();
-  }
-}  
-// --------------------------------------------------------------------------------------------
-
-// --------------------------------------------------------------------------------------------
-void left_paddle_change() {
-/* Mind this is an interrupt routine */  
+void paddle_down() {
+  // Mind this is an interrupt routine!
   if (sending_mode == AUTOMATIC_SENDING) {
-    sending_mode == MANUAL_SENDING;
-    last_sending_mode = MANUAL_SENDING; // Important for correct PTT behavior
-    wpm_dif = 0;
-    put_at = 0; // Don't call clear_send_buffer() as it sends response bytes
-    get_at = 0;
-  }
-}
-// --------------------------------------------------------------------------------------------
-
-// --------------------------------------------------------------------------------------------
-void right_paddle_change() {
-/* Mind this is an interrupt routine */  
-  if (sending_mode == AUTOMATIC_SENDING) {
-    sending_mode == MANUAL_SENDING;
-    last_sending_mode = MANUAL_SENDING; // Important for correct PTT behavior
-    wpm_dif = 0;
-    put_at = 0;
-    get_at = 0;
+    interrupt_sending = true;
   }
 }
 // --------------------------------------------------------------------------------------------
@@ -906,17 +897,17 @@ void right_paddle_change() {
 
 // --------------------------------------------------------------------------------------------
 void save_config(byte data) {
-  unsigned int hdr; 
+  unsigned int hdr;
   int ptr = 0;
-  
+
   if (data == 0) {
     hdr = 65535;
-    EEPROM.put(ptr, hdr); ptr += sizeof(hdr); 
+    EEPROM.put(ptr, hdr); ptr += sizeof(hdr);
   }
   else {
-    hdr = my_magic_header;
+    hdr = MY_HEADER;
     // Write a header to recognize that EEPROM was written:
-    EEPROM.put(ptr, hdr); ptr += sizeof(hdr); 
+    EEPROM.put(ptr, hdr); ptr += sizeof(hdr);
     // Write useful data:
     EEPROM.put(ptr, keyer_mode); ptr += sizeof(keyer_mode);
     EEPROM.put(ptr, sidetone_manual); ptr += sizeof(sidetone_manual);
@@ -933,21 +924,21 @@ void save_config(byte data) {
 
   }
   // Beep R:
-  tone(sidetone_line, 400); delay(50); noTone(sidetone_line); delay(50);
-  tone(sidetone_line, 400); delay(150); noTone(sidetone_line); delay(50);
-  tone(sidetone_line, 400); delay(50); noTone(sidetone_line); delay(50);
-  
+  tone(SIDETONE_LINE, 400); delay(50); noTone(SIDETONE_LINE); delay(50);
+  tone(SIDETONE_LINE, 400); delay(150); noTone(SIDETONE_LINE); delay(50);
+  tone(SIDETONE_LINE, 400); delay(50); noTone(SIDETONE_LINE); delay(50);
+
 }
 // --------------------------------------------------------------------------------------------
 
 
 // --------------------------------------------------------------------------------------------
 void load_config() {
-  unsigned int hdr = 0; 
+  unsigned int hdr = 0;
   int ptr = 0;
-  EEPROM.get(ptr, hdr); ptr += sizeof(hdr); 
+  EEPROM.get(ptr, hdr); ptr += sizeof(hdr);
 
-  if (hdr == my_magic_header) {  // The EEPROM was already written
+  if (hdr == MY_HEADER) {  // The EEPROM was already written
     // Read data:
     EEPROM.get(ptr, keyer_mode); ptr += sizeof(keyer_mode);
     EEPROM.get(ptr, sidetone_manual); ptr += sizeof(sidetone_manual);
@@ -960,8 +951,8 @@ void load_config() {
     EEPROM.get(ptr, paddles_trigger_ptt); ptr += sizeof(paddles_trigger_ptt);
     EEPROM.get(ptr, weighting); ptr += sizeof(weighting);
     EEPROM.get(ptr, paddles_swapped); ptr += sizeof(paddles_swapped);
-    }
-  
+  }
+
 }
 // --------------------------------------------------------------------------------------------
 
@@ -972,14 +963,14 @@ void store_message(byte data) {
   int i;
   if (data == 0) {   // Mark the whole as unused
     for (i = 256; i < 512; i++) {
-      EEPROM.write(i, 0xFF);   
-    } 
+      EEPROM.write(i, 0xFF);
+    }
   }
   else {
     i = 256;
     while (EEPROM.read(i) != 0xFF && i < 511) i++; // Find first unoccupied position
     if (i < 512) EEPROM.write(i, data);
-  }  
+  }
 }
 // --------------------------------------------------------------------------------------------
 
@@ -988,43 +979,69 @@ void store_message(byte data) {
 void check_button() {
   // Short button hit sends the message stored in EEPROM. Long press does "TUNE" (key down incl. PTT):
   long ms = millis();
-  if (digitalRead(button) == LOW) {  // Button down
+  if (digitalRead(BUTTON) == LOW) {  // Button down
     if (btn_toggle == 0)
       btn_toggle = ms;
-    else
-      if (put_at != get_at) { // Some sending is underway
-        clear_send_buffer();
-        btn_toggle = -1;          
-      } else if (ms - btn_toggle > 500 && btn_toggle > 0) { // The button kept down for abt half a second
-        clear_send_buffer();
-        key_forced_down = 2; // Do key and PTT
-        key(true); 
-        paddles_touched = false;
-        btn_toggle = -1;          
-      }
+    else if (put_at != get_at) { // Some sending is underway
+      clear_send_buffer();
+      btn_toggle = -1;
+    } else if (ms - btn_toggle > 500 && btn_toggle > 0) { // The button kept down for abt half a second
+      clear_send_buffer();
+      key_forced_down = 2; // Do key and PTT
+      key(true);
+      paddles_touched = false;
+      btn_toggle = -1;
+    }
   } else {  // Button released
-    if (btn_toggle > 0) {  
-    //  ms = ms - btn_toggle; 
+    if (btn_toggle > 0) {
+      //  ms = ms - btn_toggle;
       if (ms - btn_toggle > 10 && ms - btn_toggle < 500) { // The button shortly hit
         if (put_at == get_at) { // Send button message only if nothing else to trasmit is in the buffer
-          send_message(); 
+          send_message();
         }
       }
     }
-    
-  if (btn_toggle == -1) key(false);
-  btn_toggle = 0;  
+
+    if (btn_toggle == -1) key(false);
+    btn_toggle = 0;
   }
 }
 // --------------------------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------------------------
+// Copies the button-message from EEPROM to the standard to-be-sent buffer:
 void send_message() {
-  // Copies the button-message from EEPROM to the standard to-be-sent buffer:
   int i = 256;
   while (EEPROM.read(i) != 0xFF && i < 512) {
-    add_to_send_buffer(EEPROM.read(i));        
+    add_to_send_buffer(EEPROM.read(i));
     i++;
   }
+}
+// --------------------------------------------------------------------------------------------
+
+// --------------------------------------------------------------------------------------------
+// The paddle that interrupted sending was just released
+void check_interruption() {
+
+  if (interrupt_sending) { // The flag was set in ISR routine
+
+    // The interrupting paddle was released:
+    if ((digitalRead(PADDLE_LEFT) == HIGH) && (digitalRead(PADDLE_RIGHT) == HIGH)) {
+      interrupt_sending = false;
+      wpm_dif = 0;
+      paddles_touched = true;
+      send_response();  // Notify ctrling appl. immy
+    }
+
+    // The interrupting paddle was just depressed:
+    if ((digitalRead(PADDLE_LEFT) == LOW) || (digitalRead(PADDLE_RIGHT) == LOW)) {
+      put_at = 0;
+      get_at = 0;
+    }
+
+    
+  }
+    
+
 }
 // --------------------------------------------------------------------------------------------
